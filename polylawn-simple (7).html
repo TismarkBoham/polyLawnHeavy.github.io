@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polylawn — Site Suitability</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         max-width: 560px; margin: 60px auto; padding: 0 20px; color: #1a1a1a; }
+  h1 { font-size: 18px; margin-bottom: 18px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type=text] { flex: 1; min-width: 220px; padding: 10px 12px; font-size: 15px;
+          border: 1px solid #ccc; border-radius: 6px; font-family: inherit; }
+  .shade-field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555; }
+  .shade-field input { width: 64px; padding: 8px 10px; font-size: 14px; border: 1px solid #ccc;
+          border-radius: 6px; font-family: inherit; }
+  button { padding: 10px 18px; font-size: 15px; border: none; border-radius: 6px;
+           background: #2d7a4f; color: #fff; cursor: pointer; font-family: inherit; }
+  button:disabled { background: #9bc2ab; }
+  #progress-wrap { margin-top: 14px; display: none; }
+  #progress-track { height: 6px; background: #e6e6e6; border-radius: 3px; overflow: hidden; }
+  #progress-fill { height: 6px; width: 0%; background: #2d7a4f; transition: width .3s ease; }
+  #progress-label { font-size: 12px; color: #767676; margin-top: 6px; }
+  #status { font-size: 13px; color: #b91c1c; margin-top: 10px; min-height: 16px; }
+  #out { margin-top: 24px; display: none; }
+  .loc { font-size: 13px; color: #767676; margin-bottom: 14px; line-height: 1.6; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; }
+  .card.rank1 { border-color: #2d7a4f; background: #eef7f1; }
+  .name { font-weight: 700; font-size: 15px; display: inline-block; }
+  .tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 7px;
+         border-radius: 10px; margin-left: 6px; vertical-align: middle; }
+  .tag-grass  { background: #e8f5ee; color: #2d7a4f; }
+  .tag-flower { background: #fbeaf0; color: #993556; }
+  .tag-crop   { background: #faeeda; color: #854f0b; }
+  .score { font-size: 22px; font-weight: 700; color: #2d7a4f; float: right; }
+  .sub { font-size: 11px; color: #767676; margin-top: 6px; }
+  .why { font-size: 11px; color: #b45309; margin-top: 3px; }
+  .card { cursor: pointer; }
+  .expand-hint { font-size: 10px; color: #999; margin-top: 8px; }
+  .detail { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e2e2; }
+  .detail.open { display: block; }
+  .detail-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; }
+  .detail-label { color: #555; }
+  .detail-val { color: #999; font-size: 11px; margin-left: 6px; }
+  .detail-score { font-weight: 700; width: 30px; text-align: right; }
+  .detail-bar-wrap { flex: 1; height: 4px; background: #e6e6e6; border-radius: 2px; margin: 0 10px; }
+  .detail-bar { height: 4px; border-radius: 2px; background: #2d7a4f; }
+</style>
+</head>
+<body>
+
+<h1>Which low-growing plants fit your site?</h1>
+<div class="row">
+  <input type="text" id="address" placeholder="Enter an address">
+  <div class="shade-field">
+    <label for="shade">Shade cover</label>
+    <input type="number" id="shade" min="0" max="100" value="0">
+    <span>%</span>
+  </div>
+  <button id="btn" onclick="run()">Check</button>
+</div>
+
+<div id="progress-wrap">
+  <div id="progress-track"><div id="progress-fill"></div></div>
+  <div id="progress-label">Starting…</div>
+</div>
+<div id="status"></div>
+
+<div id="out">
+  <div class="loc" id="loc"></div>
+  <div id="cards"></div>
+</div>
+
+<script>
+// ── Site variables used for scoring ──────────────────────────────────
+// 1. Summer rainfall (in)         — Open-Meteo ERA5 archive
+// 2. Growing degree days (GDD50)  — Open-Meteo ERA5 archive, base 50°F,
+//    the standard base temperature used across turfgrass and general
+//    plant-phenology models (tracks heat accumulation available for growth)
+// 3. Soil pH                      — SoilGrids v2.0, 0-5cm
+// 4. Soil nutrients (CEC)         — SoilGrids v2.0, 0-5cm, cation exchange
+//    capacity as a proxy for how nutrient-rich/fertile the soil is
+// 5. Shade cover (%)              — user input
+//
+// Each plant has an "ideal range" for rain, GDD, pH, and CEC, plus a
+// 0-10 shade-tolerance rating. Overall SI is the average of all 5
+// sub-scores. GDD and CEC ranges below are simplified, literature-informed
+// estimates reflecting each species' general cool-season/warm-season and
+// low/high-fertility adaptation — not precise published thresholds.
+//
+// All 90 species here are ones that are practically buyable and sowable
+// as SEED for a lawn or lawn-alternative planting (not plug- or
+// division-propagated groundcovers like moss, sedum, or wild ginger).
+// Known-invasive or noxious-listed species (e.g. crown vetch, creeping
+// bentgrass escapes, ground ivy) were deliberately left out.
+var PLANTS = [
+  // ── Grasses (24) ──
+  { name: 'Buffalograss',        cat: 'Grass', type: 'Warm-season, drought tolerant',
+    rainLo: 0,  rainHi: 5,  phLo: 6.0, phHi: 8.5, gddLo: 4000, gddHi: 7500, cecLo: 5,  cecHi: 20, shadeTol: 2 },
+  { name: 'Bermudagrass',        cat: 'Grass', type: 'Warm-season, heat & drought tolerant',
+    rainLo: 0,  rainHi: 8,  phLo: 5.8, phHi: 7.5, gddLo: 4500, gddHi: 8000, cecLo: 5,  cecHi: 20, shadeTol: 2 },
+  { name: 'Zoysiagrass',         cat: 'Grass', type: 'Warm-season, dense & wear tolerant',
+    rainLo: 5,  rainHi: 12, phLo: 5.5, phHi: 7.0, gddLo: 4000, gddHi: 7500, cecLo: 8,  cecHi: 25, shadeTol: 5 },
+  { name: 'Centipedegrass',      cat: 'Grass', type: 'Warm-season, low-input on acidic soil',
+    rainLo: 8,  rainHi: 16, phLo: 4.5, phHi: 6.0, gddLo: 4000, gddHi: 7500, cecLo: 5,  cecHi: 15, shadeTol: 4 },
+  { name: 'Bahiagrass',          cat: 'Grass', type: 'Warm-season, tolerates sandy soil',
+    rainLo: 8,  rainHi: 18, phLo: 5.0, phHi: 7.0, gddLo: 4500, gddHi: 8000, cecLo: 5,  cecHi: 15, shadeTol: 5 },
+  { name: 'Blue Grama',          cat: 'Grass', type: 'Native shortgrass, drought tolerant',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 3000, gddHi: 6500, cecLo: 5,  cecHi: 18, shadeTol: 2 },
+  { name: 'Prairie Junegrass',   cat: 'Grass', type: 'Native cool-season, drought tolerant',
+    rainLo: 3,  rainHi: 8,  phLo: 6.0, phHi: 8.0, gddLo: 1800, gddHi: 4200, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+  { name: 'Sideoats Grama',      cat: 'Grass', type: 'Native warm-season, drought tolerant',
+    rainLo: 2,  rainHi: 8,  phLo: 6.0, phHi: 8.0, gddLo: 3200, gddHi: 6800, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+  { name: 'Tall Fescue',         cat: 'Grass', type: 'Cool-season, drought OK',
+    rainLo: 5,  rainHi: 10, phLo: 5.5, phHi: 7.5, gddLo: 2000, gddHi: 4500, cecLo: 8,  cecHi: 25, shadeTol: 6 },
+  { name: 'Kentucky Bluegrass',  cat: 'Grass', type: 'Cool-season, needs regular rain',
+    rainLo: 10, rainHi: 18, phLo: 6.0, phHi: 7.5, gddLo: 1800, gddHi: 4000, cecLo: 12, cecHi: 30, shadeTol: 4 },
+  { name: 'Chewings Fescue',     cat: 'Grass', type: 'Cool-season fine fescue, shade tolerant',
+    rainLo: 5,  rainHi: 12, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 3800, cecLo: 6,  cecHi: 20, shadeTol: 9 },
+  { name: 'Creeping Red Fescue', cat: 'Grass', type: 'Cool-season fine fescue, spreads by rhizome',
+    rainLo: 5,  rainHi: 12, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 3800, cecLo: 6,  cecHi: 20, shadeTol: 8 },
+  { name: 'Hard Fescue',         cat: 'Grass', type: 'Cool-season fine fescue, very low input',
+    rainLo: 3,  rainHi: 10, phLo: 5.5, phHi: 7.5, gddLo: 1500, gddHi: 4000, cecLo: 5,  cecHi: 18, shadeTol: 7 },
+  { name: 'Sheep Fescue',        cat: 'Grass', type: 'Cool-season fine fescue, poor/dry soil',
+    rainLo: 2,  rainHi: 8,  phLo: 5.0, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 4,  cecHi: 15, shadeTol: 6 },
+  { name: 'Perennial Ryegrass',  cat: 'Grass', type: 'Cool-season, fast nurse grass',
+    rainLo: 8,  rainHi: 16, phLo: 6.0, phHi: 7.0, gddLo: 1800, gddHi: 4200, cecLo: 10, cecHi: 28, shadeTol: 5 },
+  { name: 'Annual Ryegrass',     cat: 'Grass', type: 'Cool-season annual, cheap nurse grass',
+    rainLo: 8,  rainHi: 16, phLo: 6.0, phHi: 7.0, gddLo: 1800, gddHi: 4200, cecLo: 10, cecHi: 28, shadeTol: 5 },
+  { name: 'Meadow Fescue',       cat: 'Grass', type: 'Cool-season, moist meadows',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.5, gddLo: 1500, gddHi: 3800, cecLo: 10, cecHi: 28, shadeTol: 5 },
+  { name: 'Rough Bluegrass',     cat: 'Grass', type: 'Cool-season, wet shade specialist',
+    rainLo: 12, rainHi: 20, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 3600, cecLo: 8,  cecHi: 25, shadeTol: 9 },
+  { name: 'Colonial Bentgrass',  cat: 'Grass', type: 'Cool-season, fine-textured, moist',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 6.5, gddLo: 1500, gddHi: 3800, cecLo: 8,  cecHi: 22, shadeTol: 5 },
+  { name: 'Idaho Fescue',        cat: 'Grass', type: 'Native western bunchgrass, drought tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 5,  cecHi: 18, shadeTol: 4 },
+  { name: 'Redtop',              cat: 'Grass', type: 'Cool-season, wet/poor soil tolerant',
+    rainLo: 12, rainHi: 20, phLo: 4.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 5,  cecHi: 18, shadeTol: 5 },
+  { name: 'Pennsylvania Sedge',  cat: 'Grass', type: 'Native sedge, shade lawn alternative',
+    rainLo: 8,  rainHi: 16, phLo: 5.0, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 6,  cecHi: 20, shadeTol: 9 },
+  { name: 'Texas Bluegrass',     cat: 'Grass', type: 'Native transition-zone, drought tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 3000, gddHi: 6500, cecLo: 6,  cecHi: 20, shadeTol: 4 },
+  { name: 'Curly Mesquite',      cat: 'Grass', type: 'Native SW shortgrass, extreme drought',
+    rainLo: 0,  rainHi: 4,  phLo: 6.5, phHi: 8.5, gddLo: 4500, gddHi: 8000, cecLo: 4,  cecHi: 15, shadeTol: 2 },
+
+  // ── Flowers (38) ──
+  { name: 'Common Yarrow',        cat: 'Flower', type: 'Native, drought-hardy, mow tolerant',
+    rainLo: 0,  rainHi: 8,  phLo: 5.5, phHi: 7.5, gddLo: 2000, gddHi: 6000, cecLo: 5,  cecHi: 18, shadeTol: 4 },
+  { name: 'Woolly Yarrow',        cat: 'Flower', type: 'Very low drought-hardy mat',
+    rainLo: 0,  rainHi: 8,  phLo: 5.5, phHi: 7.5, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 18, shadeTol: 4 },
+  { name: 'Self-Heal',            cat: 'Flower', type: 'Mow-tolerant native wildflower',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 22, shadeTol: 7 },
+  { name: 'Lance-leaf Selfheal',  cat: 'Flower', type: 'Native, drought-adapted selfheal',
+    rainLo: 6,  rainHi: 14, phLo: 5.5, phHi: 7.5, gddLo: 1800, gddHi: 4800, cecLo: 8,  cecHi: 22, shadeTol: 6 },
+  { name: 'English Daisy',        cat: 'Flower', type: 'Self-seeding lawn daisy',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 8,  cecHi: 20, shadeTol: 5 },
+  { name: 'Common Violet',        cat: 'Flower', type: 'Spring bloomer, moist shade',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4200, cecLo: 8,  cecHi: 22, shadeTol: 8 },
+  { name: 'Confederate Violet',   cat: 'Flower', type: 'Drier-shade violet variant',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4200, cecLo: 8,  cecHi: 22, shadeTol: 7 },
+  { name: "Bird's-foot Violet",   cat: 'Flower', type: 'Native, dry sandy soils',
+    rainLo: 3,  rainHi: 10, phLo: 5.0, phHi: 6.5, gddLo: 1800, gddHi: 4500, cecLo: 5,  cecHi: 16, shadeTol: 4 },
+  { name: 'Blue-eyed Grass',      cat: 'Flower', type: 'Native, grass-like spring bloomer',
+    rainLo: 6,  rainHi: 14, phLo: 5.5, phHi: 7.0, gddLo: 1800, gddHi: 4200, cecLo: 8,  cecHi: 20, shadeTol: 5 },
+  { name: 'Lawn Daisy',           cat: 'Flower', type: 'Annual fleabane, fast colonizer',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 20, shadeTol: 5 },
+  { name: 'Philadelphia Fleabane',cat: 'Flower', type: 'Native mow-tolerant fleabane',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4200, cecLo: 8,  cecHi: 20, shadeTol: 6 },
+  { name: 'Lawn Speedwell',       cat: 'Flower', type: 'Tiny mat, near year-round bloom',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.5, gddLo: 1500, gddHi: 4200, cecLo: 8,  cecHi: 20, shadeTol: 6 },
+  { name: 'California Poppy',     cat: 'Flower', type: 'Drought-hardy, self-seeding annual',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 16, shadeTol: 2 },
+  { name: 'Baby Blue Eyes',       cat: 'Flower', type: 'Low spring wildflower annual',
+    rainLo: 6,  rainHi: 14, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 6,  cecHi: 18, shadeTol: 4 },
+  { name: 'Sweet Alyssum',        cat: 'Flower', type: 'Fragrant low mat annual',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2000, gddHi: 5500, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Moss Rose',            cat: 'Flower', type: 'Extreme-drought succulent annual',
+    rainLo: 0,  rainHi: 4,  phLo: 6.0, phHi: 8.0, gddLo: 3000, gddHi: 7000, cecLo: 4,  cecHi: 14, shadeTol: 1 },
+  { name: 'Prairie Verbena',      cat: 'Flower', type: 'Native low mat, drought hardy',
+    rainLo: 0,  rainHi: 8,  phLo: 6.0, phHi: 8.0, gddLo: 2800, gddHi: 6500, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Moss Verbena',         cat: 'Flower', type: 'Very low spreading mat',
+    rainLo: 0,  rainHi: 8,  phLo: 6.0, phHi: 8.0, gddLo: 3000, gddHi: 7000, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Trailing Evening Primrose', cat: 'Flower', type: 'Low spreading, drought hardy',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Dwarf Blanketflower',  cat: 'Flower', type: 'Compact native, drought tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+  { name: 'Dwarf Coreopsis',      cat: 'Flower', type: 'Low native, sunny',
+    rainLo: 6,  rainHi: 14, phLo: 5.5, phHi: 7.0, gddLo: 2000, gddHi: 5000, cecLo: 6,  cecHi: 18, shadeTol: 4 },
+  { name: 'Basket-of-Gold',       cat: 'Flower', type: 'Low mat, alkaline soil',
+    rainLo: 3,  rainHi: 10, phLo: 6.5, phHi: 8.0, gddLo: 2000, gddHi: 5000, cecLo: 6,  cecHi: 18, shadeTol: 3 },
+  { name: 'Candytuft',            cat: 'Flower', type: 'Low evergreen mat, drought tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2000, gddHi: 5000, cecLo: 6,  cecHi: 18, shadeTol: 3 },
+  { name: 'Rock Cress',           cat: 'Flower', type: 'Low sunny rock-garden mat',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 1800, gddHi: 4500, cecLo: 6,  cecHi: 18, shadeTol: 3 },
+  { name: "Dwarf Baby's Breath",  cat: 'Flower', type: 'Low mat, alkaline soil',
+    rainLo: 3,  rainHi: 10, phLo: 6.5, phHi: 8.0, gddLo: 2000, gddHi: 5000, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Pussytoes',            cat: 'Flower', type: 'Native very low mat, extreme drought',
+    rainLo: 0,  rainHi: 6,  phLo: 5.5, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 4,  cecHi: 15, shadeTol: 4 },
+  { name: 'Silvery Cinquefoil',   cat: 'Flower', type: 'Low drought-tolerant mat',
+    rainLo: 0,  rainHi: 8,  phLo: 5.5, phHi: 7.5, gddLo: 2000, gddHi: 5000, cecLo: 5,  cecHi: 16, shadeTol: 4 },
+  { name: 'Silverweed Cinquefoil',cat: 'Flower', type: 'Low, moist/salt tolerant',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.5, gddLo: 1500, gddHi: 4000, cecLo: 8,  cecHi: 22, shadeTol: 5 },
+  { name: 'Native Cinquefoil',    cat: 'Flower', type: 'Native, sandy dry soils',
+    rainLo: 3,  rainHi: 10, phLo: 5.0, phHi: 7.0, gddLo: 1800, gddHi: 4500, cecLo: 5,  cecHi: 16, shadeTol: 5 },
+  { name: 'Creeping Phlox',       cat: 'Flower', type: 'Spring-blooming mat, sunny slopes',
+    rainLo: 5,  rainHi: 12, phLo: 6.0, phHi: 8.0, gddLo: 2000, gddHi: 5000, cecLo: 8,  cecHi: 20, shadeTol: 3 },
+  { name: 'Moss Phlox',           cat: 'Flower', type: 'Compact spring mat',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 1800, gddHi: 4500, cecLo: 6,  cecHi: 18, shadeTol: 3 },
+  { name: 'Blue-star Creeper',    cat: 'Flower', type: 'Low, near year-round bloom, moist',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 8,  cecHi: 20, shadeTol: 6 },
+  { name: 'Creeping Veronica',    cat: 'Flower', type: 'Mat-forming spring bloomer',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4200, cecLo: 8,  cecHi: 20, shadeTol: 6 },
+  { name: 'Golden Ragwort',       cat: 'Flower', type: 'Native moist-shade rosette',
+    rainLo: 12, rainHi: 20, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 8,  cecHi: 22, shadeTol: 8 },
+  { name: 'Sweet Woodruff',       cat: 'Flower', type: 'Deep-shade groundcover',
+    rainLo: 12, rainHi: 20, phLo: 5.0, phHi: 6.5, gddLo: 1500, gddHi: 3800, cecLo: 6,  cecHi: 20, shadeTol: 9 },
+  { name: 'Thyme-leaf Sandwort',  cat: 'Flower', type: 'Tiny mat, sandy dry soils',
+    rainLo: 0,  rainHi: 6,  phLo: 5.0, phHi: 7.0, gddLo: 2000, gddHi: 5000, cecLo: 4,  cecHi: 15, shadeTol: 3 },
+  { name: 'Prairie Smoke',        cat: 'Flower', type: 'Native low prairie wildflower',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 1800, gddHi: 4500, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+  { name: 'Dwarf Zinnia',         cat: 'Flower', type: 'Very low compact annual, drought tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 7.5, gddLo: 2500, gddHi: 6000, cecLo: 6,  cecHi: 18, shadeTol: 2 },
+
+  // ── Other low-growing crops (28) ──
+  { name: 'Dutch White Clover',   cat: 'Crop', type: 'Nitrogen-fixing forage/cover crop',
+    rainLo: 5,  rainHi: 14, phLo: 6.0, phHi: 7.5, gddLo: 2000, gddHi: 5000, cecLo: 8,  cecHi: 25, shadeTol: 5 },
+  { name: 'Microclover',          cat: 'Crop', type: 'Dwarf clover, blends into lawn',
+    rainLo: 5,  rainHi: 14, phLo: 6.0, phHi: 7.5, gddLo: 2000, gddHi: 5000, cecLo: 8,  cecHi: 25, shadeTol: 6 },
+  { name: 'Strawberry Clover',    cat: 'Crop', type: 'Very low, salt/wet tolerant',
+    rainLo: 10, rainHi: 20, phLo: 6.0, phHi: 8.0, gddLo: 2000, gddHi: 5500, cecLo: 8,  cecHi: 25, shadeTol: 4 },
+  { name: 'Alsike Clover',        cat: 'Crop', type: 'Moist-tolerant forage clover',
+    rainLo: 12, rainHi: 20, phLo: 5.5, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 25, shadeTol: 5 },
+  { name: 'Kura Clover',          cat: 'Crop', type: 'Persistent, drought/cold tolerant clover',
+    rainLo: 6,  rainHi: 14, phLo: 6.0, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 24, shadeTol: 5 },
+  { name: 'Crimson Clover',       cat: 'Crop', type: 'Annual cover-crop clover',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 2200, gddHi: 5000, cecLo: 8,  cecHi: 22, shadeTol: 4 },
+  { name: 'Black Medic',          cat: 'Crop', type: 'Low nitrogen-fixing lawn legume',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 7.5, gddLo: 2200, gddHi: 5500, cecLo: 5,  cecHi: 18, shadeTol: 4 },
+  { name: 'Birdsfoot Trefoil',    cat: 'Crop', type: 'Nitrogen-fixer, poor-soil tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 7.5, gddLo: 2200, gddHi: 5500, cecLo: 5,  cecHi: 18, shadeTol: 4 },
+  { name: 'Creeping Thyme',       cat: 'Crop', type: 'Culinary herb, zero-mow mat',
+    rainLo: 0,  rainHi: 6,  phLo: 6.5, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 15, shadeTol: 2 },
+  { name: 'Wild Thyme',           cat: 'Crop', type: 'Cold-hardy fragrant mat',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 2200, gddHi: 5500, cecLo: 5,  cecHi: 15, shadeTol: 2 },
+  { name: 'Corsican Mint',        cat: 'Crop', type: 'Tiny fragrant moist-shade mat',
+    rainLo: 12, rainHi: 20, phLo: 5.5, phHi: 7.0, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 20, shadeTol: 7 },
+  { name: 'Pennyroyal',           cat: 'Crop', type: 'Minty, moist-tolerant mat',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.0, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 22, shadeTol: 6 },
+  { name: 'Roman Chamomile',      cat: 'Crop', type: 'Culinary/medicinal herb mat',
+    rainLo: 3,  rainHi: 10, phLo: 5.5, phHi: 7.5, gddLo: 2000, gddHi: 5000, cecLo: 6,  cecHi: 18, shadeTol: 3 },
+  { name: 'Wild Marjoram',        cat: 'Crop', type: 'Culinary herb, drought hardy',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2200, gddHi: 5500, cecLo: 5,  cecHi: 16, shadeTol: 3 },
+  { name: 'Creeping Savory',      cat: 'Crop', type: 'Low herb mat, drought tolerant',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 15, shadeTol: 2 },
+  { name: 'Chives',               cat: 'Crop', type: 'Low clumping culinary herb',
+    rainLo: 8,  rainHi: 16, phLo: 6.0, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 20, shadeTol: 4 },
+  { name: 'Wild Strawberry',      cat: 'Crop', type: 'Native edible fruiting groundcover',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1800, gddHi: 4200, cecLo: 8,  cecHi: 20, shadeTol: 6 },
+  { name: 'Alpine Strawberry',    cat: 'Crop', type: 'Compact edible fruiting groundcover',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.0, gddLo: 1800, gddHi: 4200, cecLo: 8,  cecHi: 22, shadeTol: 6 },
+  { name: 'Wood Sorrel',          cat: 'Crop', type: 'Edible shade groundcover',
+    rainLo: 8,  rainHi: 16, phLo: 5.5, phHi: 7.0, gddLo: 1500, gddHi: 4000, cecLo: 8,  cecHi: 20, shadeTol: 8 },
+  { name: 'Sheep Sorrel',         cat: 'Crop', type: 'Edible, poor acidic-soil tolerant',
+    rainLo: 3,  rainHi: 10, phLo: 4.5, phHi: 6.5, gddLo: 1800, gddHi: 4500, cecLo: 4,  cecHi: 15, shadeTol: 4 },
+  { name: "Miner's Lettuce",      cat: 'Crop', type: 'Native edible shade groundcover',
+    rainLo: 10, rainHi: 18, phLo: 5.5, phHi: 7.0, gddLo: 1200, gddHi: 3500, cecLo: 8,  cecHi: 22, shadeTol: 8 },
+  { name: 'Prostrate Rosemary',   cat: 'Crop', type: 'Drought-hardy culinary herb mat',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 3000, gddHi: 7000, cecLo: 4,  cecHi: 14, shadeTol: 2 },
+  { name: 'Dwarf Comfrey',        cat: 'Crop', type: 'Low nutrient-accumulating groundcover',
+    rainLo: 10, rainHi: 18, phLo: 6.0, phHi: 7.5, gddLo: 1800, gddHi: 4500, cecLo: 8,  cecHi: 22, shadeTol: 6 },
+  { name: "Lamb's Ear",           cat: 'Crop', type: 'Low fuzzy drought-tolerant groundcover',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 7.5, gddLo: 2000, gddHi: 5000, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+  { name: 'Winter Savory',        cat: 'Crop', type: 'Low evergreen culinary herb',
+    rainLo: 0,  rainHi: 6,  phLo: 6.0, phHi: 8.0, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 15, shadeTol: 2 },
+  { name: 'Golden Oregano',       cat: 'Crop', type: 'Low ornamental/culinary herb mat',
+    rainLo: 3,  rainHi: 10, phLo: 6.0, phHi: 8.0, gddLo: 2200, gddHi: 5500, cecLo: 5,  cecHi: 16, shadeTol: 4 },
+  { name: 'Buckwheat',            cat: 'Crop', type: 'Fast-growing cover crop, quick N-scavenger',
+    rainLo: 8,  rainHi: 16, phLo: 5.0, phHi: 7.0, gddLo: 2500, gddHi: 6000, cecLo: 6,  cecHi: 20, shadeTol: 3 },
+  { name: 'Partridge Pea',        cat: 'Crop', type: 'Native nitrogen-fixing annual legume',
+    rainLo: 6,  rainHi: 14, phLo: 5.5, phHi: 7.5, gddLo: 2500, gddHi: 6000, cecLo: 5,  cecHi: 18, shadeTol: 3 },
+];
+
+function rangeScore(value, lo, hi, step) {
+  var gap = value < lo ? lo - value : value > hi ? value - hi : 0;
+  return gap === 0 ? 100 : gap <= step ? 78 : gap <= step * 2 ? 55 : gap <= step * 3.5 ? 32 : 12;
+}
+
+// Soil nutrients (CEC) score asymmetrically: within the ideal range is a
+// perfect score either way, but the two directions of "off-range" mean
+// different things biologically. Too little CEC is a real limiting
+// factor (poor nutrient/water holding, plant genuinely struggles) so it's
+// penalised steeply. Too much CEC just means richer-than-needed soil,
+// which rarely hurts these species, so it's penalised gently.
+function cecScore(value, lo, hi) {
+  if (value >= lo && value <= hi) return 100;
+  if (value > hi) {
+    var over = value - hi;
+    return over <= 6 ? 88 : over <= 12 ? 76 : over <= 24 ? 65 : 55;
+  }
+  var under = lo - value;
+  return under <= 4 ? 55 : under <= 8 ? 35 : under <= 14 ? 18 : 8;
+}
+
+function shadeScore(shadePct, tol) {
+  if (shadePct < 10) return 70; // full sun: shade tolerance isn't a differentiator
+  var frac = Math.min(1, shadePct / 100);
+  return Math.round(Math.min(100, (tol / 10) * 100 * (0.35 + frac * 0.65)));
+}
+
+function siScore(site, p) {
+  var rain = rangeScore(site.rain, p.rainLo, p.rainHi, 2);
+  var gdd  = site.gdd != null ? rangeScore(site.gdd, p.gddLo, p.gddHi, 500) : 60;
+  var ph   = site.ph  != null ? rangeScore(site.ph,  p.phLo,  p.phHi,  0.4) : 60;
+  var cec  = site.cec != null ? cecScore(site.cec, p.cecLo, p.cecHi)   : 60;
+  var shade = shadeScore(site.shadePct, p.shadeTol);
+  var subs = { rain: rain, gdd: gdd, ph: ph, cec: cec, shade: shade };
+  var total = Math.round((rain + gdd + ph + cec + shade) / 5);
+  return { total: total, subs: subs };
+}
+
+// ── Progress bar ──────────────────────────────────────────────────
+var progress = 0;
+function setProgress(pct, label) {
+  progress = Math.max(progress, pct);
+  document.getElementById('progress-fill').style.width = progress + '%';
+  document.getElementById('progress-label').textContent = label + ' (' + progress + '%)';
+}
+
+// ── Geocoding ─────────────────────────────────────────────────────
+async function geocode(addr) {
+  var r = await fetch('https://photon.komoot.io/api/?q=' + encodeURIComponent(addr) + '&limit=1&lang=en');
+  var d = await r.json();
+  if (!d.features || !d.features.length) return null;
+  var f = d.features[0], p = f.properties;
+  return {
+    lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0],
+    name: [p.name, p.city || p.county, p.state, p.country].filter(Boolean).join(', ')
+  };
+}
+
+// ── Climate: summer rainfall + growing degree days (base 50°F) ──────
+async function fetchClimate(lat, lon) {
+  var url = 'https://archive-api.open-meteo.com/v1/archive'
+    + '?latitude=' + lat.toFixed(4) + '&longitude=' + lon.toFixed(4)
+    + '&start_date=2019-01-01&end_date=2023-12-31'
+    + '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min'
+    + '&temperature_unit=fahrenheit&timezone=auto';
+  var r = await fetch(url);
+  var j = await r.json();
+  if (!j.daily || !j.daily.time) return null;
+
+  var byYear = {}; // { year: { summerPrecipMm, gdd } }
+  j.daily.time.forEach(function (t, i) {
+    var y = t.slice(0, 4), m = parseInt(t.slice(5, 7));
+    if (!byYear[y]) byYear[y] = { summerMm: 0, gdd: 0 };
+    if (m >= 6 && m <= 8) byYear[y].summerMm += (j.daily.precipitation_sum[i] || 0);
+    var tmax = j.daily.temperature_2m_max[i], tmin = j.daily.temperature_2m_min[i];
+    if (tmax != null && tmin != null) {
+      byYear[y].gdd += Math.max(0, (tmax + tmin) / 2 - 50);
+    }
+  });
+  var years = Object.keys(byYear);
+  var avgSummerIn = years.reduce(function (s, y) { return s + byYear[y].summerMm; }, 0) / years.length / 25.4;
+  var avgGdd = years.reduce(function (s, y) { return s + byYear[y].gdd; }, 0) / years.length;
+  return { summerPrecipIn: avgSummerIn, gdd: Math.round(avgGdd) };
+}
+
+// ── Soil: pH + nutrients (CEC), nearest available point ─────────────
+// SoilGrids v2.0 masks out water, glaciers, and built-up/urban land, so a
+// geocoded street address almost always lands on a masked pixel. All
+// candidate points (the address + expanding rings) are queried in one
+// parallel batch so the whole search resolves in roughly one round trip.
+async function soilAt(lat, lon, timeoutMs) {
+  var ctrl = new AbortController();
+  var t = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+  try {
+    var url = 'https://rest.isric.org/soilgrids/v2.0/properties/query'
+      + '?lon=' + lon.toFixed(5) + '&lat=' + lat.toFixed(5)
+      + '&property=phh2o&property=cec&depth=0-5cm&value=mean';
+    var r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    var j = await r.json();
+    var layers = j && j.properties && j.properties.layers;
+    if (!layers) return null;
+    var phLayer  = layers.find(function (l) { return l.name === 'phh2o'; });
+    var cecLayer = layers.find(function (l) { return l.name === 'cec'; });
+    var phRaw  = phLayer  && phLayer.depths[0]  && phLayer.depths[0].values.mean;
+    var cecRaw = cecLayer && cecLayer.depths[0] && cecLayer.depths[0].values.mean;
+    if (phRaw == null) return null;
+    return { ph: phRaw / 10, cec: cecRaw != null ? cecRaw / 10 : null };
+  } catch (e) { clearTimeout(t); return null; }
+}
+
+function ringPoints(lat, lon, radiusM) {
+  var mLa = 111000, mLo = 111000 * Math.cos(lat * Math.PI / 180);
+  var pts = [];
+  for (var i = 0; i < 8; i++) {
+    var ang = (i / 8) * 2 * Math.PI;
+    pts.push({
+      lat: lat + Math.cos(ang) * radiusM / mLa,
+      lon: lon + Math.sin(ang) * radiusM / mLo,
+      dist: radiusM
+    });
+  }
+  return pts;
+}
+
+async function fetchSoil(lat, lon) {
+  var candidates = [{ lat: lat, lon: lon, dist: 0 }]
+    .concat(ringPoints(lat, lon, 400))
+    .concat(ringPoints(lat, lon, 1200))
+    .concat(ringPoints(lat, lon, 3000))
+    .concat(ringPoints(lat, lon, 5000));
+
+  var timeoutMs = 6000;
+  var vals = await Promise.all(candidates.map(function (c) { return soilAt(c.lat, c.lon, timeoutMs); }));
+
+  var best = null, bestDist = Infinity;
+  for (var i = 0; i < vals.length; i++) {
+    if (vals[i] != null && candidates[i].dist < bestDist) { best = vals[i]; bestDist = candidates[i].dist; }
+  }
+  return best != null ? { ph: best.ph, cec: best.cec, offsetM: bestDist } : null;
+}
+
+// ── Main ──────────────────────────────────────────────────────────
+async function run() {
+  var addr = document.getElementById('address').value.trim();
+  var shadePct = Math.max(0, Math.min(100, parseInt(document.getElementById('shade').value) || 0));
+  var btn = document.getElementById('btn');
+  var status = document.getElementById('status');
+  var out = document.getElementById('out');
+  var progressWrap = document.getElementById('progress-wrap');
+
+  out.style.display = 'none';
+  status.textContent = '';
+  progress = 0;
+  progressWrap.style.display = 'block';
+  setProgress(0, 'Starting');
+
+  if (!addr) { status.textContent = 'Enter an address.'; progressWrap.style.display = 'none'; return; }
+
+  btn.disabled = true; btn.textContent = 'Checking…';
+
+  try {
+    setProgress(10, 'Geocoding address');
+    var geo = await geocode(addr);
+    if (!geo) throw new Error('Address not found.');
+    setProgress(25, 'Address located');
+
+    setProgress(30, 'Fetching climate and soil data');
+    var results = await Promise.all([
+      fetchClimate(geo.lat, geo.lon).then(function (r) { setProgress(70, 'Climate data received'); return r; }),
+      fetchSoil(geo.lat, geo.lon).then(function (r) { setProgress(85, 'Soil data received'); return r; })
+    ]);
+    var climate = results[0];
+    var soil = results[1];
+    if (!climate) throw new Error('Climate data unavailable.');
+
+    setProgress(92, 'Scoring 15 species');
+    var site = {
+      rain: climate.summerPrecipIn,
+      gdd: climate.gdd,
+      ph: soil ? soil.ph : null,
+      cec: soil ? soil.cec : null,
+      shadePct: shadePct
+    };
+
+    var ranked = PLANTS.map(function (p) {
+      var s = siScore(site, p);
+      return { plant: p, si: s.total, subs: s.subs };
+    }).sort(function (a, b) { return b.si - a.si; });
+
+    setProgress(100, 'Done');
+
+    document.getElementById('loc').textContent =
+      geo.name
+      + ' — summer rain: ' + site.rain.toFixed(1) + '"'
+      + ' · GDD50: ' + site.gdd
+      + (site.ph != null ? ' · soil pH: ' + site.ph.toFixed(1) : ' · soil pH: no data')
+      + (site.cec != null ? ' · CEC: ' + site.cec.toFixed(1) + ' cmol/kg' : '')
+      + (soil && soil.offsetM > 0 ? ' (nearest soil data ~' + soil.offsetM + 'm away)' : '')
+      + ' · shade: ' + shadePct + '%';
+
+    var tagClass = { Grass: 'tag-grass', Flower: 'tag-flower', Crop: 'tag-crop' };
+    var VAR_META = {
+      rain:  { label: 'Summer rain',    unit: '"',       fmt: function (v) { return v.toFixed(1); } },
+      gdd:   { label: 'Growing degree days', unit: '',   fmt: function (v) { return Math.round(v); } },
+      ph:    { label: 'Soil pH',        unit: '',        fmt: function (v) { return v.toFixed(1); } },
+      cec:   { label: 'Soil nutrients (CEC)', unit: ' cmol/kg', fmt: function (v) { return v.toFixed(1); } },
+      shade: { label: 'Shade cover',    unit: '%',       fmt: function (v) { return Math.round(v); } },
+    };
+    var VAR_RANGE_KEYS = { rain: ['rainLo', 'rainHi'], gdd: ['gddLo', 'gddHi'], ph: ['phLo', 'phHi'], cec: ['cecLo', 'cecHi'] };
+    var siteVals = { rain: site.rain, gdd: site.gdd, ph: site.ph, cec: site.cec, shade: site.shadePct };
+
+    function scoreColor(s) { return s >= 70 ? '#2d7a4f' : s >= 45 ? '#c25a00' : '#b91c1c'; }
+
+    document.getElementById('cards').innerHTML = ranked.map(function (r, i) {
+      var subs = r.subs;
+      var lowest = Object.keys(subs).sort(function (a, b) { return subs[a] - subs[b]; }).slice(0, 2);
+      var labelMap = { rain: 'rain', gdd: 'temperature', ph: 'pH', cec: 'nutrients', shade: 'shade' };
+      var why = lowest.map(function (k) { return labelMap[k] + ' (' + subs[k] + ')'; }).join(', ');
+      var cardId = 'card-' + i;
+
+      var detailRows = Object.keys(subs).map(function (k) {
+        var meta = VAR_META[k];
+        var siteVal = siteVals[k];
+        var siteStr = siteVal != null ? meta.fmt(siteVal) + meta.unit : 'no data';
+        var rangeStr = k === 'shade'
+          ? 'tolerance ' + r.plant.shadeTol + '/10'
+          : (r.plant[VAR_RANGE_KEYS[k][0]] + '–' + r.plant[VAR_RANGE_KEYS[k][1]] + meta.unit + ' ideal');
+        var s = subs[k];
+        return '<div class="detail-row">'
+          + '<span class="detail-label">' + meta.label + '<span class="detail-val">site: ' + siteStr + ' · ' + rangeStr + '</span></span>'
+          + '<span class="detail-bar-wrap"><span class="detail-bar" style="width:' + s + '%;background:' + scoreColor(s) + '"></span></span>'
+          + '<span class="detail-score" style="color:' + scoreColor(s) + '">' + s + '</span>'
+          + '</div>';
+      }).join('');
+
+      return '<div class="card' + (i === 0 ? ' rank1' : '') + '" onclick="toggleDetail(event, \'' + cardId + '\')">'
+        + '<span class="score">' + r.si + '</span>'
+        + '<div><span class="name">#' + (i + 1) + ' ' + r.plant.name + '</span>'
+        + '<span class="tag ' + tagClass[r.plant.cat] + '">' + r.plant.cat + '</span></div>'
+        + '<div class="sub">' + r.plant.type + '</div>'
+        + '<div class="why">Limiting factors: ' + why + '</div>'
+        + '<div class="expand-hint">Click for full score breakdown ▾</div>'
+        + '<div class="detail" id="' + cardId + '">' + detailRows + '</div>'
+        + '</div>';
+    }).join('');
+
+    out.style.display = 'block';
+  } catch (e) {
+    status.textContent = e.message;
+  }
+  btn.disabled = false; btn.textContent = 'Check';
+}
+
+function toggleDetail(evt, id) {
+  evt.stopPropagation();
+  var el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+document.getElementById('address').addEventListener('keydown', function (e) { if (e.key === 'Enter') run(); });
+</script>
+</body>
+</html>
